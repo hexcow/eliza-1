@@ -40,27 +40,22 @@ echo "Analyzing commit history..."
 commit_data=$(git log --reverse --pretty=format:"%H %an %ad" --date=short)
 
 # Process the commit data to identify which commits to keep
-declare -A keep_commits
-declare -A author_commits
-previous_commit=""
-previous_author=""
-previous_date=""
+# Instead of associative arrays, we'll use a file to track kept commits
+keep_commits_file=$(mktemp)
+previous_keys_file=$(mktemp)
 
 while IFS=" " read -r hash author date rest; do
   key="${author}:${date}"
   
-  # If this is the first commit by this author on this date, mark it to keep
-  if [[ -z "${author_commits[$key]}" ]]; then
-    keep_commits[$hash]=1
-    author_commits[$key]=$hash
+  # Check if we've already seen this author:date combination
+  if ! grep -q "^$key$" "$previous_keys_file"; then
+    # This is the first commit by this author on this date, mark it to keep
+    echo "$hash" >> "$keep_commits_file"
+    echo "$key" >> "$previous_keys_file"
     echo "Keeping commit $hash by $author on $date"
   else
     echo "Will squash commit $hash by $author on $date"
   fi
-  
-  previous_commit=$hash
-  previous_author=$author
-  previous_date=$date
 done <<< "$commit_data"
 
 # Now create a git filter-branch command to rewrite history
@@ -75,7 +70,7 @@ git_commands_file=$(mktemp)
 
 # Get all commits in reverse order again for the rebase script
 git log --reverse --pretty=format:"%H %an %ad" --date=short | while IFS=" " read -r hash author date rest; do
-  if [[ -n "${keep_commits[$hash]}" ]]; then
+  if grep -q "^$hash$" "$keep_commits_file"; then
     echo "pick $hash" >> "$git_commands_file"
   else
     echo "fixup $hash" >> "$git_commands_file"
@@ -86,7 +81,7 @@ done
 GIT_SEQUENCE_EDITOR="cat $git_commands_file >" git rebase -i --root
 
 # Clean up
-rm "$git_commands_file"
+rm "$git_commands_file" "$keep_commits_file" "$previous_keys_file"
 
 echo "Squashing complete! New branch 'v2-squashed' created."
 echo "Number of commits in original branch: $total_commits"
