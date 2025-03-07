@@ -82,6 +82,12 @@ cleanup() {
   rm -f "$git_commands_file" "$keep_commits_file" "$previous_keys_file"
 }
 
+# Function to check if there are merge conflicts
+has_conflicts() {
+  git status --porcelain | grep -q "^UU " || git status --porcelain | grep -q "^.U "
+  return $?
+}
+
 # Function to handle rebase conflicts
 handle_conflicts() {
   echo
@@ -131,8 +137,9 @@ handle_conflicts() {
       ;;
     4)
       echo "Attempting to use 'ours' strategy for all conflicts..."
-      git status --porcelain | grep "^UU " | awk '{print $2}' | xargs -I{} git checkout --ours {}
-      git add .
+      git status --porcelain | grep "^UU " | awk '{print $2}' | xargs -I{} git checkout --ours {} 2>/dev/null || true
+      git status --porcelain | grep "^.U " | awk '{print $2}' | xargs -I{} git checkout --ours {} 2>/dev/null || true
+      git add . 2>/dev/null || true
       git rebase --continue
       return 0
       ;;
@@ -155,26 +162,58 @@ rebase_status=$?
 
 # Handle rebase conflicts if any
 while [ $rebase_status -ne 0 ]; do
-  # Check if we're in a rebase state (with conflicts)
-  if git rev-parse --verify refs/rebase-merge/head >/dev/null 2>&1 || \
-     git rev-parse --verify refs/rebase-apply/head >/dev/null 2>&1; then
+  # Simple check for merge conflicts by looking at git status
+  if has_conflicts; then
+    echo "Detected merge conflicts."
     handle_conflicts
-    # Get the new status after handling conflicts
-    if git rev-parse --verify refs/rebase-merge/head >/dev/null 2>&1 || \
-       git rev-parse --verify refs/rebase-apply/head >/dev/null 2>&1; then
-      # We're still rebasing, check result of last operation
-      rebase_status=$?
-    else
-      # No longer rebasing, must have finished or aborted
-      break
-    fi
+    # Check if the conflicts were resolved
+    rebase_status=$?
+  elif [ -d ".git/rebase-merge" ] || [ -d ".git/rebase-apply" ]; then
+    # We're in some rebase state but not sure what's happening
+    echo "In rebase state with issues."
+    handle_conflicts
+    rebase_status=$?
   else
-    # Something else went wrong that isn't a conflict
-    echo "Error during rebase that isn't a conflict. Aborting."
-    git checkout "$current_branch" 2>/dev/null || true
-    git branch -D v2-squashed 2>/dev/null || true
-    cleanup
-    exit 1
+    # Something else went wrong
+    echo "Rebase failed but no conflicts detected. This could be due to:"
+    echo "1. Non-conflict errors in the rebase process"
+    echo "2. The repository structure or state preventing clean rebasing"
+    echo
+    echo "Options:"
+    echo "  1. Abort and return to original branch"
+    echo "  2. Try skipping the current problematic commit"
+    echo
+    echo "Enter your choice (1-2):"
+    read choice
+    
+    case "$choice" in
+      1)
+        git rebase --abort 2>/dev/null || true
+        git checkout "$current_branch" 2>/dev/null || true
+        git branch -D v2-squashed 2>/dev/null || true
+        cleanup
+        echo "Returned to original branch $current_branch"
+        exit 1
+        ;;
+      2)
+        echo "Attempting to skip the problematic commit..."
+        git rebase --skip 2>/dev/null || true
+        rebase_status=$?
+        ;;
+      *)
+        echo "Invalid choice. Aborting."
+        git rebase --abort 2>/dev/null || true
+        git checkout "$current_branch" 2>/dev/null || true
+        git branch -D v2-squashed 2>/dev/null || true
+        cleanup
+        exit 1
+        ;;
+    esac
+  fi
+  
+  # If we're no longer in a rebase state, we're done
+  if [ ! -d ".git/rebase-merge" ] && [ ! -d ".git/rebase-apply" ]; then
+    break
   fi
 done
 
