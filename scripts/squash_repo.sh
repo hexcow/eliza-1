@@ -77,11 +77,112 @@ git log --reverse --pretty=format:"%H %an %ad" --date=short | while IFS=" " read
   fi
 done
 
-# Perform the rebase
+# Function to handle cleanup
+cleanup() {
+  rm -f "$git_commands_file" "$keep_commits_file" "$previous_keys_file"
+}
+
+# Function to handle rebase conflicts
+handle_conflicts() {
+  echo
+  echo "Rebase encountered conflicts."
+  echo "Options:"
+  echo "  1. Abort the rebase and return to original branch"
+  echo "  2. Open a shell for you to resolve conflicts manually"
+  echo "  3. Skip the current commit and continue rebasing"
+  echo "  4. Try to automatically use 'ours' strategy for all conflicts"
+  echo
+  echo "Enter your choice (1-4):"
+  read choice
+
+  case "$choice" in
+    1)
+      echo "Aborting rebase..."
+      git rebase --abort
+      git checkout "$current_branch"
+      git branch -D v2-squashed
+      cleanup
+      echo "Returned to original branch $current_branch"
+      exit 1
+      ;;
+    2)
+      echo "Opening shell for manual conflict resolution."
+      echo "Once you've resolved all conflicts, run:"
+      echo "  git add <resolved-files>"
+      echo "  git rebase --continue"
+      echo "  exit"
+      echo
+      echo "To abort the rebase and the script, run:"
+      echo "  git rebase --abort"
+      echo "  exit 1"
+      $SHELL
+      if [ $? -ne 0 ]; then
+        echo "Shell exited with an error. Aborting."
+        git rebase --abort 2>/dev/null || true
+        git checkout "$current_branch" 2>/dev/null || true
+        cleanup
+        exit 1
+      fi
+      ;;
+    3)
+      echo "Skipping current commit..."
+      git rebase --skip
+      return 0
+      ;;
+    4)
+      echo "Attempting to use 'ours' strategy for all conflicts..."
+      git status --porcelain | grep "^UU " | awk '{print $2}' | xargs -I{} git checkout --ours {}
+      git add .
+      git rebase --continue
+      return 0
+      ;;
+    *)
+      echo "Invalid choice. Aborting."
+      git rebase --abort
+      git checkout "$current_branch"
+      git branch -D v2-squashed
+      cleanup
+      exit 1
+      ;;
+  esac
+}
+
+# Perform the rebase with error handling
+echo "Starting rebase. This may take a while..."
+set +e  # Don't exit on error for this section
 GIT_SEQUENCE_EDITOR="cat $git_commands_file >" git rebase -i --root
+rebase_status=$?
+
+# Handle rebase conflicts if any
+while [ $rebase_status -ne 0 ]; do
+  # Check if we're in a rebase state (with conflicts)
+  if git rev-parse --verify refs/rebase-merge/head >/dev/null 2>&1 || \
+     git rev-parse --verify refs/rebase-apply/head >/dev/null 2>&1; then
+    handle_conflicts
+    # Get the new status after handling conflicts
+    if git rev-parse --verify refs/rebase-merge/head >/dev/null 2>&1 || \
+       git rev-parse --verify refs/rebase-apply/head >/dev/null 2>&1; then
+      # We're still rebasing, check result of last operation
+      rebase_status=$?
+    else
+      # No longer rebasing, must have finished or aborted
+      break
+    fi
+  else
+    # Something else went wrong that isn't a conflict
+    echo "Error during rebase that isn't a conflict. Aborting."
+    git checkout "$current_branch" 2>/dev/null || true
+    git branch -D v2-squashed 2>/dev/null || true
+    cleanup
+    exit 1
+  fi
+done
+
+# Reset error handling
+set -e
 
 # Clean up
-rm "$git_commands_file" "$keep_commits_file" "$previous_keys_file"
+cleanup
 
 echo "Squashing complete! New branch 'v2-squashed' created."
 echo "Number of commits in original branch: $total_commits"
@@ -91,4 +192,4 @@ echo "To push the squashed branch to remote:"
 echo "  git push -f origin v2-squashed"
 echo ""
 echo "To switch back to your original branch:"
-echo "  git checkout $current_branch"
+echo "  git checkout $current_branch" 
